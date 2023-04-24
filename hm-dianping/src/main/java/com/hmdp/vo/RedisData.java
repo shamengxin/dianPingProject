@@ -1,7 +1,8 @@
-package com.hmdp.utils;
+package com.hmdp.vo;
 
 import lombok.Data;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
