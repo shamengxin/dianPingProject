@@ -8,12 +8,17 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
 
 /**
@@ -32,6 +37,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Autowired
     private RedisIdWorker redisIdWorker;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Autowired
+    private RedissonClient redissonClient;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
@@ -52,13 +63,25 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足！");
         }
         Long userId = UserHolder.getUser().getId();
-        synchronized (userId.toString().intern()){
-            //原因：因为所调用的这个方法有事务机制，使用了spring的自动代理，要想这个事务生效，只能使用这个类
-            //的代理类来调用这个方法，才会有事务的机制，所以这里要创建事务这个类的事务代理类
+        // 创建锁对象
+        // SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate, "order:" + userId);
+        RLock lock = redissonClient.getLock("lock:order:" + userId);
+        // 获取锁
+        boolean isLock = lock.tryLock();
+        // 判断是否获取锁成功
+        if (!isLock) {
+            //获取锁失败，返回错误或重试
+            return Result.fail("每人限购一单");
+        }
+        try {
             IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
             return proxy.createVoucherOrder(voucherId);
+        }finally {
+            //释放锁
+            lock.unlock();
         }
     }
+
     @Transactional
     public Result createVoucherOrder(Long voucherId){
         // 6.一人一单
@@ -72,7 +95,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         // 7.充足，扣减库存
         boolean success = seckillVoucherService.update()
                 .setSql("stock = stock - 1")
-                .eq("voucher_id", voucherId).gt("stock",0)
+                .eq("voucher_id", voucherId)
+                .gt("stock",0)
                 .update();
         if (!success) {
             return Result.fail("库存不足！");
